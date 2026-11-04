@@ -1,9 +1,7 @@
 package io.github.fastfilter.jbinfuse;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * A {@link VerifiedConstMap} with each value stored next to its check word, so that a lookup
@@ -14,32 +12,16 @@ import java.util.Objects;
  * <p>This is a Java implementation of the {@code PairedVerifiedConstMap} of
  * <a href="https://github.com/lemire/constmap">constmap</a> (Go). Its serialized form
  * ({@code PMAP0001}) is shared with constmap, rsconstmap (Rust) and fastconstmap (C and
- * Python), and for the same keys and values this class writes exactly the bytes that the Go
- * and Rust implementations write. See {@link ConstMap} for how keys are hashed.
+ * Python), and for the same keys and values the maps built here serialize to exactly the
+ * bytes that the Go and Rust implementations write. See {@link ConstMap} for how keys are
+ * hashed, and for the two implementations: on-heap maps and in-place views
+ * ({@link #wrap(ByteBuffer)}).
  *
- * <p>Instances are immutable and thread-safe.
+ * <p>Instances are immutable and thread-safe (a view, as long as its buffer's bytes are not
+ * modified).
  */
-public final class PairedVerifiedConstMap {
-  private final ConstMaps.Params params;
-  private final long seed;
-  private final int segmentLength;
-  private final int segmentLengthMask;
-  private final long segmentCountLength;
-  /** The value for position i at slots[2i], its check word at slots[2i+1]. */
-  private final long[] slots;
-
-  private PairedVerifiedConstMap(ConstMaps.Params params, long[] slots) {
-    this.params = params;
-    this.seed = params.seed();
-    this.segmentLength = params.segmentLength();
-    this.segmentLengthMask = params.segmentLengthMask();
-    this.segmentCountLength = params.segmentCountLength();
-    this.slots = slots;
-  }
-
-  static PairedVerifiedConstMap of(ConstMaps.Params params, long[] slots) {
-    return new PairedVerifiedConstMap(params, slots);
-  }
+public sealed interface PairedVerifiedConstMap
+    permits HeapPairedVerifiedConstMap, BufferPairedVerifiedConstMap {
 
   /**
    * Builds a map from string keys and their values: {@code keys.get(i)} maps to
@@ -47,11 +29,11 @@ public final class PairedVerifiedConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static PairedVerifiedConstMap build(List<String> keys, long[] values) {
+  static PairedVerifiedConstMap build(List<String> keys, long[] values) {
     return VerifiedConstMap.build(keys, values).paired();
   }
 
@@ -61,11 +43,11 @@ public final class PairedVerifiedConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static PairedVerifiedConstMap buildFromBytes(List<byte[]> keys, long[] values) {
+  static PairedVerifiedConstMap buildFromBytes(List<byte[]> keys, long[] values) {
     return VerifiedConstMap.buildFromBytes(keys, values).paired();
   }
 
@@ -75,12 +57,54 @@ public final class PairedVerifiedConstMap {
    *
    * @param keyHashes the XXH64 hashes (seed 0) of the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two hashes are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static PairedVerifiedConstMap buildFromHashes(long[] keyHashes, long[] values) {
+  static PairedVerifiedConstMap buildFromHashes(long[] keyHashes, long[] values) {
     return VerifiedConstMap.buildFromHashes(keyHashes, values).paired();
+  }
+
+  /**
+   * Reads a serialized map ({@code PMAP0001}) starting at the buffer's position into a new
+   * on-heap map, after validating its header and checksum. The buffer's position is not
+   * changed.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is not a valid {@code PairedVerifiedConstMap}
+   *     or is corrupt
+   */
+  static PairedVerifiedConstMap load(ByteBuffer buffer) {
+    return HeapPairedVerifiedConstMap.read(buffer);
+  }
+
+  /**
+   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
+   *
+   * @param bytes the serialized map
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is invalid or corrupt
+   */
+  static PairedVerifiedConstMap load(byte[] bytes) {
+    return load(ByteBuffer.wrap(bytes));
+  }
+
+  /**
+   * Returns a map that queries the serialized map ({@code PMAP0001}) starting at the buffer's
+   * position directly, without copying it. The buffer may be on the heap, direct or a
+   * {@link java.nio.MappedByteBuffer}; its position, limit and byte order are not changed.
+   * There is no alignment requirement.
+   *
+   * <p>This method runs in constant time: it validates the header but does not verify the
+   * checksum (use {@link #load(ByteBuffer)} for that). See {@link ConstMap#wrap(ByteBuffer)}.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return a view backed by the buffer
+   * @throws InvalidFilterException if the header is invalid or the buffer is too short
+   */
+  static PairedVerifiedConstMap wrap(ByteBuffer buffer) {
+    return BufferPairedVerifiedConstMap.wrap(buffer);
   }
 
   /**
@@ -90,23 +114,7 @@ public final class PairedVerifiedConstMap {
    * @param keyHash the XXH64 hash of the key
    * @return the value, or {@link VerifiedConstMap#NOT_FOUND} if the key is not in the map
    */
-  public long getByHash(long keyHash) {
-    if (slots.length == 0) {
-      return ConstMaps.NOT_FOUND;
-    }
-    long hash = ConstMaps.mixsplit(keyHash, seed);
-    int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-    int h1 = (h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask);
-    int h2 = (h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask);
-    final long[] s = slots;
-    int i0 = 2 * h0;
-    int i1 = 2 * h1;
-    int i2 = 2 * h2;
-    if ((s[i0 + 1] ^ s[i1 + 1] ^ s[i2 + 1]) != ConstMaps.fingerprint(hash)) {
-      return ConstMaps.NOT_FOUND;
-    }
-    return s[i0] ^ s[i1] ^ s[i2];
-  }
+  long getByHash(long keyHash);
 
   /**
    * Returns the value of a string key (hashed through its UTF-8 encoding).
@@ -114,7 +122,7 @@ public final class PairedVerifiedConstMap {
    * @param key the key
    * @return the value, or {@link VerifiedConstMap#NOT_FOUND} if the key is not in the map
    */
-  public long get(String key) {
+  default long get(String key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -124,7 +132,7 @@ public final class PairedVerifiedConstMap {
    * @param key the key
    * @return the value, or {@link VerifiedConstMap#NOT_FOUND} if the key is not in the map
    */
-  public long get(byte[] key) {
+  default long get(byte[] key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -137,7 +145,7 @@ public final class PairedVerifiedConstMap {
    * @return the value, or {@link VerifiedConstMap#NOT_FOUND} if the key is not in the map
    * @throws IndexOutOfBoundsException if the range is not within the array
    */
-  public long get(byte[] key, int off, int len) {
+  default long get(byte[] key, int off, int len) {
     return getByHash(XxHash64.hash(key, off, len));
   }
 
@@ -148,7 +156,7 @@ public final class PairedVerifiedConstMap {
    * @param key the key
    * @return the value, or {@link VerifiedConstMap#NOT_FOUND} if the key is not in the map
    */
-  public long get(ByteBuffer key) {
+  default long get(ByteBuffer key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -161,7 +169,7 @@ public final class PairedVerifiedConstMap {
    *     false positive), false if it is not or if its value is
    *     {@link VerifiedConstMap#NOT_FOUND}
    */
-  public boolean containsKey(String key) {
+  default boolean containsKey(String key) {
     return get(key) != ConstMaps.NOT_FOUND;
   }
 
@@ -175,35 +183,7 @@ public final class PairedVerifiedConstMap {
    * @param dst where the values go; only the first {@code keys.size()} entries are written
    * @throws IndexOutOfBoundsException if {@code dst} is shorter than {@code keys}
    */
-  public void getMany(List<String> keys, long[] dst) {
-    int n = keys.size();
-    Objects.checkFromIndexSize(0, n, dst.length);
-    if (slots.length == 0) {
-      Arrays.fill(dst, 0, n, ConstMaps.NOT_FOUND);
-      return;
-    }
-    final long[] s = slots;
-    final int[] h = new int[3 * ConstMap.BLOCK];
-    final long[] fp = new long[ConstMap.BLOCK];
-    for (int start = 0; start < n; start += ConstMap.BLOCK) {
-      int m = Math.min(ConstMap.BLOCK, n - start);
-      for (int j = 0; j < m; j++) {
-        long hash = ConstMaps.mixsplit(XxHash64.hash(keys.get(start + j)), seed);
-        int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-        h[3 * j] = 2 * h0;
-        h[3 * j + 1] = 2 * ((h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask));
-        h[3 * j + 2] = 2 * ((h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask));
-        fp[j] = ConstMaps.fingerprint(hash);
-      }
-      for (int j = 0; j < m; j++) {
-        int a = h[3 * j];
-        int b = h[3 * j + 1];
-        int c = h[3 * j + 2];
-        long v = s[a] ^ s[b] ^ s[c];
-        dst[start + j] = (s[a + 1] ^ s[b + 1] ^ s[c + 1]) == fp[j] ? v : ConstMaps.NOT_FOUND;
-      }
-    }
-  }
+  void getMany(List<String> keys, long[] dst);
 
   /**
    * Looks up many string keys at once, as {@link #getMany(List, long[])} does, into a new
@@ -212,7 +192,7 @@ public final class PairedVerifiedConstMap {
    * @param keys the keys
    * @return the values, one per key, {@link VerifiedConstMap#NOT_FOUND} for missing keys
    */
-  public long[] getMany(List<String> keys) {
+  default long[] getMany(List<String> keys) {
     long[] dst = new long[keys.size()];
     getMany(keys, dst);
     return dst;
@@ -224,9 +204,7 @@ public final class PairedVerifiedConstMap {
    *
    * @return the number of positions
    */
-  public int arrayLength() {
-    return slots.length / 2;
-  }
+  int arrayLength();
 
   /**
    * Returns the number of bytes written by {@link #serialize(ByteBuffer)}: a 32-byte header,
@@ -234,65 +212,29 @@ public final class PairedVerifiedConstMap {
    *
    * @return the serialized size in bytes
    */
-  public int serializedSize() {
-    return ConstMaps.VMAP_HEADER + 8 * slots.length + 8;
-  }
+  int serializedSize();
 
   /**
-   * Writes the map at the buffer's current position, in the {@code PMAP0001} format shared
-   * with the Go, Rust and C implementations, and advances the position by
-   * {@link #serializedSize()}. The buffer's byte order is ignored and left unchanged.
+   * Writes the map at the buffer's current position and advances the position by
+   * {@link #serializedSize()}. An on-heap map writes the {@code PMAP0001} format shared with
+   * the Go, Rust and C implementations; a view writes the bytes it wraps, unchanged. The
+   * buffer's byte order is ignored and left unchanged.
    *
    * @param out the destination
    * @throws java.nio.BufferOverflowException if fewer than {@link #serializedSize()} bytes
    *     remain
    * @throws java.nio.ReadOnlyBufferException if the buffer is read-only
    */
-  public void serialize(ByteBuffer out) {
-    ConstMaps.write(out, ConstMaps.MAGIC_PMAP, params, slots.length / 2, true, slots);
-  }
+  void serialize(ByteBuffer out);
 
   /**
    * Returns the serialized form of the map, as written by {@link #serialize(ByteBuffer)}.
    *
    * @return a new array of {@link #serializedSize()} bytes
    */
-  public byte[] toByteArray() {
+  default byte[] toByteArray() {
     byte[] bytes = new byte[serializedSize()];
     serialize(ByteBuffer.wrap(bytes));
     return bytes;
-  }
-
-  /**
-   * Reads a serialized map ({@code PMAP0001}) starting at the buffer's position into a new
-   * on-heap map, after validating its header and checksum. The buffer's position is not
-   * changed.
-   *
-   * @param buffer a buffer holding a serialized map at its position
-   * @return the map
-   * @throws InvalidFilterException if the input is not a valid {@code PairedVerifiedConstMap}
-   *     or is corrupt
-   */
-  public static PairedVerifiedConstMap load(ByteBuffer buffer) {
-    ConstMaps.Header h = ConstMaps.read(buffer, ConstMaps.Kind.PAIRED, 2);
-    int n = h.params().arrayLength();
-    return new PairedVerifiedConstMap(h.params(), ConstMaps.readWords(buffer, h.start(), 2 * n));
-  }
-
-  /**
-   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
-   *
-   * @param bytes the serialized map
-   * @return the map
-   * @throws InvalidFilterException if the input is invalid or corrupt
-   */
-  public static PairedVerifiedConstMap load(byte[] bytes) {
-    return load(ByteBuffer.wrap(bytes));
-  }
-
-  @Override
-  public String toString() {
-    return "PairedVerifiedConstMap{positions=" + arrayLength() + ", bytes=" + serializedSize()
-        + "}";
   }
 }

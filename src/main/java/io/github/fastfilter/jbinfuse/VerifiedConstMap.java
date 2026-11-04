@@ -1,9 +1,7 @@
 package io.github.fastfilter.jbinfuse;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * An immutable map from keys (strings or byte sequences) to 64-bit values that detects
@@ -20,36 +18,21 @@ import java.util.Objects;
  * <p>This is a Java implementation of the {@code VerifiedConstMap} of
  * <a href="https://github.com/lemire/constmap">constmap</a> (Go). Its serialized form
  * ({@code VMAP0001}) is shared with constmap, rsconstmap (Rust) and fastconstmap (C and
- * Python), and for the same keys and values this class writes exactly the bytes that the Go
- * and Rust implementations write. See {@link ConstMap} for how keys are hashed.
+ * Python), and for the same keys and values the maps built here serialize to exactly the
+ * bytes that the Go and Rust implementations write. See {@link ConstMap} for how keys are
+ * hashed, and for the two implementations: on-heap maps and in-place views
+ * ({@link #wrap(ByteBuffer)}).
  *
- * <p>Instances are immutable and thread-safe.
+ * <p>Instances are immutable and thread-safe (a view, as long as its buffer's bytes are not
+ * modified).
  */
-public final class VerifiedConstMap {
+public sealed interface VerifiedConstMap permits HeapVerifiedConstMap, BufferVerifiedConstMap {
   /**
    * The value returned for a key that is not in the map: all 64 bits set ({@code -1}, or
    * 2<sup>64</sup>-1 read as unsigned). A key mapped to this value cannot be told apart from a
    * missing key.
    */
-  public static final long NOT_FOUND = ConstMaps.NOT_FOUND;
-
-  private final ConstMaps.Params params;
-  private final long seed;
-  private final int segmentLength;
-  private final int segmentLengthMask;
-  private final long segmentCountLength;
-  private final long[] data;
-  private final long[] checks;
-
-  private VerifiedConstMap(ConstMaps.Params params, long[] data, long[] checks) {
-    this.params = params;
-    this.seed = params.seed();
-    this.segmentLength = params.segmentLength();
-    this.segmentLengthMask = params.segmentLengthMask();
-    this.segmentCountLength = params.segmentCountLength();
-    this.data = data;
-    this.checks = checks;
-  }
+  long NOT_FOUND = ConstMaps.NOT_FOUND;
 
   /**
    * Builds a map from string keys and their values: {@code keys.get(i)} maps to
@@ -57,13 +40,13 @@ public final class VerifiedConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static VerifiedConstMap build(List<String> keys, long[] values) {
+  static VerifiedConstMap build(List<String> keys, long[] values) {
     ConstMaps.checkLengths(keys.size(), values.length);
-    return buildFromHashes(ConstMaps.hashStrings(keys), values);
+    return HeapVerifiedConstMap.build(ConstMaps.hashStrings(keys), values);
   }
 
   /**
@@ -72,13 +55,13 @@ public final class VerifiedConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static VerifiedConstMap buildFromBytes(List<byte[]> keys, long[] values) {
+  static VerifiedConstMap buildFromBytes(List<byte[]> keys, long[] values) {
     ConstMaps.checkLengths(keys.size(), values.length);
-    return buildFromHashes(ConstMaps.hashBytes(keys), values);
+    return HeapVerifiedConstMap.build(ConstMaps.hashBytes(keys), values);
   }
 
   /**
@@ -87,21 +70,55 @@ public final class VerifiedConstMap {
    *
    * @param keyHashes the XXH64 hashes (seed 0) of the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two hashes are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static VerifiedConstMap buildFromHashes(long[] keyHashes, long[] values) {
+  static VerifiedConstMap buildFromHashes(long[] keyHashes, long[] values) {
     ConstMaps.checkLengths(keyHashes.length, values.length);
-    if (keyHashes.length == 0) {
-      return new VerifiedConstMap(ConstMaps.Params.EMPTY, new long[0], new long[0]);
-    }
-    ConstMaps.Peeled p = ConstMaps.peel(keyHashes);
-    int n = p.params().arrayLength();
-    long[] data = new long[n];
-    long[] checks = new long[n];
-    ConstMaps.assign(p, values, data, checks);
-    return new VerifiedConstMap(p.params(), data, checks);
+    return HeapVerifiedConstMap.build(keyHashes, values);
+  }
+
+  /**
+   * Reads a serialized map ({@code VMAP0001}) starting at the buffer's position into a new
+   * on-heap map, after validating its header and checksum. The buffer's position is not
+   * changed.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is not a valid {@code VerifiedConstMap} or is
+   *     corrupt
+   */
+  static VerifiedConstMap load(ByteBuffer buffer) {
+    return HeapVerifiedConstMap.read(buffer);
+  }
+
+  /**
+   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
+   *
+   * @param bytes the serialized map
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is invalid or corrupt
+   */
+  static VerifiedConstMap load(byte[] bytes) {
+    return load(ByteBuffer.wrap(bytes));
+  }
+
+  /**
+   * Returns a map that queries the serialized map ({@code VMAP0001}) starting at the buffer's
+   * position directly, without copying it. The buffer may be on the heap, direct or a
+   * {@link java.nio.MappedByteBuffer}; its position, limit and byte order are not changed.
+   * There is no alignment requirement.
+   *
+   * <p>This method runs in constant time: it validates the header but does not verify the
+   * checksum (use {@link #load(ByteBuffer)} for that). See {@link ConstMap#wrap(ByteBuffer)}.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return a view backed by the buffer
+   * @throws InvalidFilterException if the header is invalid or the buffer is too short
+   */
+  static VerifiedConstMap wrap(ByteBuffer buffer) {
+    return BufferVerifiedConstMap.wrap(buffer);
   }
 
   /**
@@ -111,19 +128,7 @@ public final class VerifiedConstMap {
    * @param keyHash the XXH64 hash of the key
    * @return the value, or {@link #NOT_FOUND} if the key is not in the map
    */
-  public long getByHash(long keyHash) {
-    if (data.length == 0) {
-      return NOT_FOUND;
-    }
-    long hash = ConstMaps.mixsplit(keyHash, seed);
-    int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-    int h1 = (h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask);
-    int h2 = (h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask);
-    if ((checks[h0] ^ checks[h1] ^ checks[h2]) != ConstMaps.fingerprint(hash)) {
-      return NOT_FOUND;
-    }
-    return data[h0] ^ data[h1] ^ data[h2];
-  }
+  long getByHash(long keyHash);
 
   /**
    * Returns the value of a string key (hashed through its UTF-8 encoding).
@@ -131,7 +136,7 @@ public final class VerifiedConstMap {
    * @param key the key
    * @return the value, or {@link #NOT_FOUND} if the key is not in the map
    */
-  public long get(String key) {
+  default long get(String key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -141,7 +146,7 @@ public final class VerifiedConstMap {
    * @param key the key
    * @return the value, or {@link #NOT_FOUND} if the key is not in the map
    */
-  public long get(byte[] key) {
+  default long get(byte[] key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -154,7 +159,7 @@ public final class VerifiedConstMap {
    * @return the value, or {@link #NOT_FOUND} if the key is not in the map
    * @throws IndexOutOfBoundsException if the range is not within the array
    */
-  public long get(byte[] key, int off, int len) {
+  default long get(byte[] key, int off, int len) {
     return getByHash(XxHash64.hash(key, off, len));
   }
 
@@ -165,7 +170,7 @@ public final class VerifiedConstMap {
    * @param key the key
    * @return the value, or {@link #NOT_FOUND} if the key is not in the map
    */
-  public long get(ByteBuffer key) {
+  default long get(ByteBuffer key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -177,7 +182,7 @@ public final class VerifiedConstMap {
    * @return true if the key is in the map (or, with probability about 2<sup>-64</sup>, a
    *     false positive), false if it is not or if its value is {@link #NOT_FOUND}
    */
-  public boolean containsKey(String key) {
+  default boolean containsKey(String key) {
     return get(key) != NOT_FOUND;
   }
 
@@ -191,36 +196,7 @@ public final class VerifiedConstMap {
    * @param dst where the values go; only the first {@code keys.size()} entries are written
    * @throws IndexOutOfBoundsException if {@code dst} is shorter than {@code keys}
    */
-  public void getMany(List<String> keys, long[] dst) {
-    int n = keys.size();
-    Objects.checkFromIndexSize(0, n, dst.length);
-    if (data.length == 0) {
-      Arrays.fill(dst, 0, n, NOT_FOUND);
-      return;
-    }
-    final long[] d = data;
-    final long[] c = checks;
-    final int[] h = new int[3 * ConstMap.BLOCK];
-    final long[] fp = new long[ConstMap.BLOCK];
-    for (int start = 0; start < n; start += ConstMap.BLOCK) {
-      int m = Math.min(ConstMap.BLOCK, n - start);
-      for (int j = 0; j < m; j++) {
-        long hash = ConstMaps.mixsplit(XxHash64.hash(keys.get(start + j)), seed);
-        int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-        h[3 * j] = h0;
-        h[3 * j + 1] = (h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask);
-        h[3 * j + 2] = (h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask);
-        fp[j] = ConstMaps.fingerprint(hash);
-      }
-      for (int j = 0; j < m; j++) {
-        int a = h[3 * j];
-        int b = h[3 * j + 1];
-        int e = h[3 * j + 2];
-        long v = d[a] ^ d[b] ^ d[e];
-        dst[start + j] = (c[a] ^ c[b] ^ c[e]) == fp[j] ? v : NOT_FOUND;
-      }
-    }
-  }
+  void getMany(List<String> keys, long[] dst);
 
   /**
    * Looks up many string keys at once, as {@link #getMany(List, long[])} does, into a new
@@ -229,25 +205,18 @@ public final class VerifiedConstMap {
    * @param keys the keys
    * @return the values, one per key, {@link #NOT_FOUND} for missing keys
    */
-  public long[] getMany(List<String> keys) {
+  default long[] getMany(List<String> keys) {
     long[] dst = new long[keys.size()];
     getMany(keys, dst);
     return dst;
   }
 
   /**
-   * Returns the same map in the paired layout, as a copy.
+   * Returns the same map in the paired layout, as a new on-heap map (also for a view).
    *
    * @return a {@link PairedVerifiedConstMap} giving the same answers
    */
-  public PairedVerifiedConstMap paired() {
-    long[] slots = new long[2 * data.length];
-    for (int i = 0; i < data.length; i++) {
-      slots[2 * i] = data[i];
-      slots[2 * i + 1] = checks[i];
-    }
-    return PairedVerifiedConstMap.of(params, slots);
-  }
+  PairedVerifiedConstMap paired();
 
   /**
    * Returns the number of positions in each of the map's two arrays: about 1.125 per key for
@@ -255,9 +224,7 @@ public final class VerifiedConstMap {
    *
    * @return the array length
    */
-  public int arrayLength() {
-    return data.length;
-  }
+  int arrayLength();
 
   /**
    * Returns the number of bytes written by {@link #serialize(ByteBuffer)}: a 32-byte header,
@@ -265,65 +232,29 @@ public final class VerifiedConstMap {
    *
    * @return the serialized size in bytes
    */
-  public int serializedSize() {
-    return ConstMaps.VMAP_HEADER + 16 * data.length + 8;
-  }
+  int serializedSize();
 
   /**
-   * Writes the map at the buffer's current position, in the {@code VMAP0001} format shared
-   * with the Go, Rust and C implementations, and advances the position by
-   * {@link #serializedSize()}. The buffer's byte order is ignored and left unchanged.
+   * Writes the map at the buffer's current position and advances the position by
+   * {@link #serializedSize()}. An on-heap map writes the {@code VMAP0001} format shared with
+   * the Go, Rust and C implementations; a view writes the bytes it wraps, unchanged. The
+   * buffer's byte order is ignored and left unchanged.
    *
    * @param out the destination
    * @throws java.nio.BufferOverflowException if fewer than {@link #serializedSize()} bytes
    *     remain
    * @throws java.nio.ReadOnlyBufferException if the buffer is read-only
    */
-  public void serialize(ByteBuffer out) {
-    ConstMaps.write(out, ConstMaps.MAGIC_VMAP, params, data.length, true, data, checks);
-  }
+  void serialize(ByteBuffer out);
 
   /**
    * Returns the serialized form of the map, as written by {@link #serialize(ByteBuffer)}.
    *
    * @return a new array of {@link #serializedSize()} bytes
    */
-  public byte[] toByteArray() {
+  default byte[] toByteArray() {
     byte[] bytes = new byte[serializedSize()];
     serialize(ByteBuffer.wrap(bytes));
     return bytes;
-  }
-
-  /**
-   * Reads a serialized map ({@code VMAP0001}) starting at the buffer's position into a new
-   * on-heap map, after validating its header and checksum. The buffer's position is not
-   * changed.
-   *
-   * @param buffer a buffer holding a serialized map at its position
-   * @return the map
-   * @throws InvalidFilterException if the input is not a valid {@code VerifiedConstMap} or is
-   *     corrupt
-   */
-  public static VerifiedConstMap load(ByteBuffer buffer) {
-    ConstMaps.Header h = ConstMaps.read(buffer, ConstMaps.Kind.VERIFIED, 2);
-    int n = h.params().arrayLength();
-    return new VerifiedConstMap(h.params(), ConstMaps.readWords(buffer, h.start(), n),
-        ConstMaps.readWords(buffer, h.start() + 8 * n, n));
-  }
-
-  /**
-   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
-   *
-   * @param bytes the serialized map
-   * @return the map
-   * @throws InvalidFilterException if the input is invalid or corrupt
-   */
-  public static VerifiedConstMap load(byte[] bytes) {
-    return load(ByteBuffer.wrap(bytes));
-  }
-
-  @Override
-  public String toString() {
-    return "VerifiedConstMap{positions=" + data.length + ", bytes=" + serializedSize() + "}";
   }
 }

@@ -28,6 +28,9 @@ final class ConstMaps {
   static final int MAX_SEGMENT_LENGTH = 262144;
   static final int MAX_ITERATIONS = 100;
 
+  /** Keys per block in the batched lookups ({@code getMany}). */
+  static final int BLOCK = 8;
+
   /**
    * Largest array length we build or load: a paired map holds two words per position in one
    * Java array.
@@ -460,14 +463,33 @@ final class ConstMaps {
     out.position(w.position());
   }
 
-  /** A parsed header: the parameters, the header size and where the arrays start. */
-  record Header(Params params, int headerSize, int start) {}
+  /**
+   * A parsed header: the parameters, the absolute index of the first byte of the serialized
+   * map, the header size (so the arrays start at {@code start + headerSize}), and the total
+   * size including the checksum.
+   */
+  record Header(Params params, int start, int headerSize, int totalBytes) {
+    int arrayStart() {
+      return start + headerSize;
+    }
+  }
 
   /**
    * Reads and validates the header of a map of the given kind at the buffer's position, and
    * verifies the trailing checksum over {@code wordsPerPosition} words per array position.
    */
   static Header read(ByteBuffer buffer, Kind kind, int wordsPerPosition) {
+    Header h = readHeader(buffer, kind, wordsPerPosition);
+    verifyChecksum(buffer, h);
+    return h;
+  }
+
+  /**
+   * Reads and validates the header of a map of the given kind at the buffer's position, in
+   * constant time: magic bytes, segment parameters consistent with the array length, and a
+   * buffer long enough for the whole map. Does not verify the checksum.
+   */
+  static Header readHeader(ByteBuffer buffer, Kind kind, int wordsPerPosition) {
     ByteBuffer b = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
     final int start = b.position();
     if (b.remaining() < 8) {
@@ -494,7 +516,8 @@ final class ConstMaps {
     }
     if (found != kind) {
       throw new InvalidFilterException("this is a " + found.className + ", not a "
-          + kind.className + "; load it with " + found.className + ".load");
+          + kind.className + "; use " + found.className + ".load or " + found.className
+          + ".wrap");
     }
     final int headerSize = (kind == Kind.CONST && !counted) ? CMAP_HEADER : VMAP_HEADER;
     if (b.remaining() < headerSize) {
@@ -531,9 +554,15 @@ final class ConstMaps {
       }
       params = new Params(seed, segmentLength, segmentCount, (int) count);
     }
+    return new Header(params, start, headerSize, (int) total);
+  }
+
+  /** Verifies the trailing FNV-1a checksum of a map whose header was read by readHeader. */
+  static void verifyChecksum(ByteBuffer buffer, Header header) {
+    ByteBuffer b = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
     long h = FNV_OFFSET;
-    int end = (int) (start + total - 8);
-    int i = start;
+    int end = header.start() + header.totalBytes() - 8;
+    int i = header.start();
     for (; i + 8 <= end; i += 8) {
       h = fnv(h, b.getLong(i));
     }
@@ -545,7 +574,23 @@ final class ConstMaps {
       throw new InvalidFilterException(String.format(
           "checksum mismatch (stored %016x, computed %016x)", stored, h));
     }
-    return new Header(params, headerSize, start + headerSize);
+  }
+
+  /**
+   * Writes the serialized bytes a view wraps, unchanged, at {@code out}'s position, and
+   * advances the position.
+   */
+  static void copy(ByteBuffer serialized, ByteBuffer out) {
+    writer(out, serialized.capacity());
+    out.put(serialized.duplicate().clear());
+  }
+
+  /**
+   * A little-endian slice of {@code bytes} bytes of the buffer from absolute index
+   * {@code from}, independent of the buffer's position, limit and byte order.
+   */
+  static ByteBuffer slice(ByteBuffer buffer, int from, int bytes) {
+    return buffer.slice(from, bytes).order(ByteOrder.LITTLE_ENDIAN);
   }
 
   /** Reads {@code n} little-endian words starting at absolute index {@code from}. */
