@@ -237,6 +237,30 @@ try (FileChannel ch = FileChannel.open(Path.of("built-by-go.vmap"), StandardOpen
 - The view is valid as long as the buffer's bytes are not modified. The buffer's position,
   limit and byte order are not changed.
 
+On an Intel Xeon Gold 6548N (JDK 25, one pinned core, `ConstMapBenchmark`), ns per lookup of
+a present string key in random order, on-heap map against views of a direct buffer and of a
+memory-mapped file:
+
+| | keys | heap | direct | mapped |
+| --- | ---: | ---: | ---: | ---: |
+| `ConstMap.get` | 1M | 38.9 | 41.3 | 44.5 |
+| | 10M | 44.7 | 46.6 | 54.8 |
+| `VerifiedConstMap.get` | 1M | 43.4 | 47.5 | 54.9 |
+| | 10M | 49.7 | 51.6 | 66.2 |
+| `PairedVerifiedConstMap.get` | 1M | 42.9 | 44.6 | 51.3 |
+| | 10M | 47.8 | 48.2 | 59.1 |
+| `ConstMap.getMany` | 1M | 29.0 | 30.1 | 31.1 |
+| | 10M | 30.3 | 31.0 | 35.9 |
+| `VerifiedConstMap.getMany` | 1M | 34.9 | 35.2 | 38.8 |
+| | 10M | 35.8 | 37.1 | 49.4 |
+| `PairedVerifiedConstMap.getMany` | 1M | 31.8 | 31.8 | 33.9 |
+| | 10M | 32.9 | 32.9 | 37.8 |
+
+A direct buffer costs 0 to 4 ns per lookup over the heap. A memory-mapped file costs more, up
+to 10 to 16 ns at ten million keys for the verified map, which reads two arrays; `getMany`
+and the paired layout recover most of it. As with filters, choose views when heap use or
+opening time matters more than those nanoseconds.
+
 ### Constant map performance
 
 JMH (`ConstMapBenchmark`, on-heap maps) on an Apple M4 Max with JDK 27, ns per lookup of a present key, in
