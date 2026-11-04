@@ -20,6 +20,9 @@ filters for the same false-positive rate, and a query reads exactly three memory
   `BinaryFuse16`), the fastest; and **in-place views** of a serialized filter in a
   `ByteBuffer` (heap, direct, or a memory-mapped file), with near-zero heap use and instant
   open. See [Choosing a query mode](#choosing-a-query-mode).
+- **Constant maps** from string or byte-array keys to 64-bit values, built on the same
+  construction (about 9 or 18 bytes per key), whose files are interchangeable with the Go,
+  Rust and C/Python implementations. See [Constant maps](#constant-maps).
 
 ## Maven
 
@@ -139,16 +142,106 @@ misses on 4 KiB page-cache pages, whereas a large Java heap typically uses 2 MiB
 huge pages.) Choose `wrap` when heap memory or open time matters more than those nanoseconds,
 for example for many large filters.
 
+## Constant maps
+
+The binary fuse construction also gives an immutable map from keys to 64-bit values that does
+not store the keys: a lookup is one hash, three array reads and two XORs.
+
+```java
+import io.github.fastfilter.jbinfuse.ConstMap;
+import io.github.fastfilter.jbinfuse.VerifiedConstMap;
+
+List<String> keys = List.of("apple", "banana", "cherry");
+long[] values = {100, 200, 300};
+
+ConstMap cm = ConstMap.build(keys, values);          // about 9 bytes per key
+cm.get("banana");                                    // 200
+cm.get("grape");                                     // an arbitrary value!
+
+VerifiedConstMap vm = VerifiedConstMap.build(keys, values);   // about 18 bytes per key
+vm.get("banana");                                    // 200
+vm.get("grape");                                     // VerifiedConstMap.NOT_FOUND (-1)
+vm.containsKey("grape");                             // false
+
+long[] many = vm.getMany(List.of("apple", "grape")); // {100, NOT_FOUND}
+```
+
+| | `ConstMap` | `VerifiedConstMap` | `PairedVerifiedConstMap` |
+| --- | --- | --- | --- |
+| bytes per key | about 9 | about 18 | about 18 |
+| missing key | arbitrary value | `NOT_FOUND` | `NOT_FOUND` |
+| cache lines per lookup | 3 | 6 (3 for most misses) | 3 |
+| best when | you only look up keys in the map | most lookups miss | most lookups hit |
+
+Keys must be distinct. String keys are hashed through their UTF-8 encoding with XXH64
+(`XxHash64`), so `get("abc")` and `get("abc".getBytes(UTF_8))` are the same lookup; there are
+also `buildFromBytes(List<byte[]>, long[])`, `get(byte[], int, int)`, `get(ByteBuffer)`, and
+`buildFromHashes`/`getByHash` taking XXH64 hashes you computed yourself. A verified map reports
+a missing key as present with probability about 2<sup>-64</sup>; a key whose value is
+`NOT_FOUND` cannot be told apart from a missing one. `vm.paired()` converts a
+`VerifiedConstMap` to a `PairedVerifiedConstMap`.
+
+`getMany` hashes a block of keys before reading the array, so that the processor can overlap
+the memory accesses of several lookups; it returns exactly what a loop over `get` would.
+
+### Interoperability with constmap, rsconstmap and fastconstmap
+
+These classes are a Java implementation of [constmap](https://github.com/lemire/constmap) (Go),
+also implemented by [rsconstmap](https://github.com/lemire/rsconstmap) (Rust) and
+[fastconstmap](https://github.com/lemire/fastconstmap) (C, with Python bindings). All four
+share the key hash, the mixing, the seed sequence, the layout and the file formats, so a map
+saved by any of them loads in the others:
+
+```java
+Files.write(Path.of("map.vmap"), vm.toByteArray());                    // Go, Rust, Python read it
+VerifiedConstMap fromPython = VerifiedConstMap.load(Files.readAllBytes(Path.of("built-by-python.vmap")));
+```
+
+- For the same keys and values, the Java classes write exactly the bytes that Go and Rust
+  write: `CMAP0001`, `VMAP0001` and `PMAP0001`. This is tested against the files of the other
+  implementations and against the Go package for sizes from 0 to 1,234,567 keys.
+- `ConstMap.load` also reads fastconstmap's `CMAP0003` (the same format with a key count,
+  which is ignored). fastconstmap's key count in the padding word of the other two formats is
+  ignored too.
+- Files from fastconstmap 0.9 and earlier (`CMAP0002`, `VCMP0002`) used another hash (XXH3)
+  and are refused with a message saying so; rebuild them with fastconstmap 0.10 or later.
+- `load` validates the magic bytes, the segment parameters and the FNV-1a checksum, and throws
+  `InvalidFilterException` otherwise, including for a file of another kind of map.
+
+The constant maps are always loaded onto the heap; there is no in-place view as for filters.
+
+### Constant map performance
+
+JMH (`ConstMapBenchmark`) on an Apple M4 Max with JDK 27, ns per lookup of a present key, in
+random order, with keys like `key-123456-1e3779b9`:
+
+| | 1 million keys | 10 million keys |
+| --- | ---: | ---: |
+| `ConstMap.get(String)` | 16.7 | 33.0 |
+| `ConstMap.getMany` | 16.2 | 24.8 |
+| `VerifiedConstMap.get(String)` | 25.8 | 65.4 |
+| `VerifiedConstMap.getMany` | 20.1 | 38.1 |
+| `PairedVerifiedConstMap.get(String)` | 23.1 | 44.9 |
+| `PairedVerifiedConstMap.getMany` | 20.7 | 28.9 |
+
+About 12 ns of a lookup at one million keys is hashing the string. ASCII strings are hashed
+straight from their chars; other strings are first encoded to UTF-8, which costs more.
+`get(byte[])` with a ready byte array takes about 11.8 ns at one million keys.
+
 ## API summary
 
 | Type | Members |
 | --- | --- |
 | `BinaryFuse8`, `BinaryFuse16` | `build(long[])`, `build(long[], int)`, `buildFromBytes(Collection<byte[]>)` |
 | `BinaryFuseFilter` (interface) | `contains(long)`, `contains(byte[])`, `contains(byte[], int, int)`, `contains(ByteBuffer)`, `fingerprintBits()`, `keyCount()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()`; static `wrap(ByteBuffer)`, `load(ByteBuffer)`, `load(byte[])` |
+| `ConstMap` | static `build(List<String>, long[])`, `buildFromBytes(List<byte[]>, long[])`, `buildFromHashes(long[], long[])`, `load(ByteBuffer)`, `load(byte[])`; `get(String)`, `get(byte[])`, `get(byte[], int, int)`, `get(ByteBuffer)`, `getByHash(long)`, `getMany(List<String>)`, `getMany(List<String>, long[])`, `arrayLength()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()` |
+| `VerifiedConstMap` | as `ConstMap`, plus `containsKey(String)`, `paired()` and the constant `NOT_FOUND` |
+| `PairedVerifiedConstMap` | as `ConstMap`, plus `containsKey(String)` |
+| `XxHash64` | `hash(String)`, `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)` |
 | `WyHash` | `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)`, `hash64(long, long)` |
 | `InvalidFilterException` | thrown for corrupt or invalid serialized input |
 
-All filters are immutable and safe for concurrent queries.
+All filters and maps are immutable and safe for concurrent queries.
 
 ## Size and false-positive rate
 
@@ -247,7 +340,12 @@ of the library will keep reading version 1.
 ```
 
 The wyhash test vectors in `src/test/resources/wyhash_vectors.txt` were generated from the
-reference C implementation by `tools/wyhash_vectors.c` (see the comment at the top of that file).
+reference C implementation by `tools/wyhash_vectors.c` (see the comment at the top of that file),
+and the XXH64 vectors in `src/test/resources/xxh64_vectors.txt` by `tools/xxh64_vectors.c`.
+`src/test/resources/constmap_vectors.txt` holds the size and checksum of maps built by the Go
+constmap package, written by `tools/constmap_vectors` (`go run .` in that directory), and
+`src/test/resources/constmap/` holds the interoperability files of the constmap repository,
+written by rsconstmap and fastconstmap.
 
 ## Release procedure
 
@@ -270,7 +368,7 @@ The workflow uses the repository secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `M
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE). The wyhash algorithm is by Wang Yi and is in the
-public domain.
+public domain. The XXH64 algorithm is by Yann Collet.
 
 ## Reference
 
