@@ -208,11 +208,38 @@ VerifiedConstMap fromPython = VerifiedConstMap.load(Files.readAllBytes(Path.of("
 - `load` validates the magic bytes, the segment parameters and the FNV-1a checksum, and throws
   `InvalidFilterException` otherwise, including for a file of another kind of map.
 
-The constant maps are always loaded onto the heap; there is no in-place view as for filters.
+### Querying a constant map in place
+
+As with filters, `wrap(ByteBuffer)` returns a view that queries a serialized map in place,
+without copying it, from a heap, direct or memory-mapped buffer. It reads every format above,
+written by any of the four implementations:
+
+```java
+try (FileChannel ch = FileChannel.open(Path.of("built-by-go.vmap"), StandardOpenOption.READ)) {
+  MappedByteBuffer mapped = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+  VerifiedConstMap view = VerifiedConstMap.wrap(mapped);   // constant time, no copy
+  view.get("banana");
+}
+```
+
+- Views give the same answers as on-heap maps, including `getMany` and `paired()` (which
+  returns a new on-heap map). This is tested on the files written by rsconstmap and
+  fastconstmap, at every alignment, in heap, direct and memory-mapped buffers.
+- There is no alignment requirement. A Go or Rust `ConstMap` file (`CMAP0001`), whose 28-byte
+  header leaves the array 4 bytes off an 8-byte boundary, can be wrapped too, at any offset;
+  fastconstmap's `from_buffer` refuses those files.
+- `wrap` validates the header in constant time (magic bytes, segment parameters consistent
+  with the array length, and a buffer long enough for the whole map) but does not verify the
+  checksum, which would read the whole map; `load` does. On corrupt bytes, a view gives wrong
+  answers but never reads outside the map.
+- A view serializes to the bytes it wraps, unchanged (so a `CMAP0003` file from fastconstmap
+  stays one, and keeps its key count). On-heap maps write the formats of Go and Rust.
+- The view is valid as long as the buffer's bytes are not modified. The buffer's position,
+  limit and byte order are not changed.
 
 ### Constant map performance
 
-JMH (`ConstMapBenchmark`) on an Apple M4 Max with JDK 27, ns per lookup of a present key, in
+JMH (`ConstMapBenchmark`, on-heap maps) on an Apple M4 Max with JDK 27, ns per lookup of a present key, in
 random order, with keys like `key-123456-1e3779b9`:
 
 | | 1 million keys | 10 million keys |
@@ -234,9 +261,9 @@ straight from their chars; other strings are first encoded to UTF-8, which costs
 | --- | --- |
 | `BinaryFuse8`, `BinaryFuse16` | `build(long[])`, `build(long[], int)`, `buildFromBytes(Collection<byte[]>)` |
 | `BinaryFuseFilter` (interface) | `contains(long)`, `contains(byte[])`, `contains(byte[], int, int)`, `contains(ByteBuffer)`, `fingerprintBits()`, `keyCount()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()`; static `wrap(ByteBuffer)`, `load(ByteBuffer)`, `load(byte[])` |
-| `ConstMap` | static `build(List<String>, long[])`, `buildFromBytes(List<byte[]>, long[])`, `buildFromHashes(long[], long[])`, `load(ByteBuffer)`, `load(byte[])`; `get(String)`, `get(byte[])`, `get(byte[], int, int)`, `get(ByteBuffer)`, `getByHash(long)`, `getMany(List<String>)`, `getMany(List<String>, long[])`, `arrayLength()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()` |
-| `VerifiedConstMap` | as `ConstMap`, plus `containsKey(String)`, `paired()` and the constant `NOT_FOUND` |
-| `PairedVerifiedConstMap` | as `ConstMap`, plus `containsKey(String)` |
+| `ConstMap` (interface) | static `build(List<String>, long[])`, `buildFromBytes(List<byte[]>, long[])`, `buildFromHashes(long[], long[])`, `load(ByteBuffer)`, `load(byte[])`, `wrap(ByteBuffer)`; `get(String)`, `get(byte[])`, `get(byte[], int, int)`, `get(ByteBuffer)`, `getByHash(long)`, `getMany(List<String>)`, `getMany(List<String>, long[])`, `arrayLength()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()` |
+| `VerifiedConstMap` (interface) | as `ConstMap`, plus `containsKey(String)`, `paired()` and the constant `NOT_FOUND` |
+| `PairedVerifiedConstMap` (interface) | as `ConstMap`, plus `containsKey(String)` |
 | `XxHash64` | `hash(String)`, `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)` |
 | `WyHash` | `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)`, `hash64(long, long)` |
 | `InvalidFilterException` | thrown for corrupt or invalid serialized input |

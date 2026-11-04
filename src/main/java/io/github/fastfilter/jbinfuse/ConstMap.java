@@ -2,7 +2,6 @@ package io.github.fastfilter.jbinfuse;
 
 import java.nio.ByteBuffer;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * An immutable map from keys (strings or byte sequences) to 64-bit values, in about 9 bytes
@@ -17,31 +16,22 @@ import java.util.Objects;
  * (Go). Its serialized form is shared with constmap, with
  * <a href="https://github.com/lemire/rsconstmap">rsconstmap</a> (Rust) and with
  * <a href="https://github.com/lemire/fastconstmap">fastconstmap</a> (C and Python): a map
- * built by any of them loads in the others. For the same keys and values, this class writes
- * exactly the bytes that the Go and Rust implementations write.
+ * built by any of them loads in the others. For the same keys and values, the maps built here
+ * serialize to exactly the bytes that the Go and Rust implementations write.
+ *
+ * <p>There are two implementations with identical answers: on-heap maps, from the
+ * {@code build} methods and {@link #load(ByteBuffer)}, which are the fastest; and views from
+ * {@link #wrap(ByteBuffer)}, which query a serialized map in place in a heap, direct or
+ * memory-mapped buffer, without copying it.
  *
  * <p>String keys are hashed through their UTF-8 encoding, so {@code get("abc")} and
  * {@code get("abc".getBytes(UTF_8))} are the same lookup. Values are 64-bit words; read them as
  * unsigned if you need values above {@link Long#MAX_VALUE}.
  *
- * <p>Instances are immutable and thread-safe.
+ * <p>Instances are immutable and thread-safe (a view, as long as its buffer's bytes are not
+ * modified).
  */
-public final class ConstMap {
-  private final ConstMaps.Params params;
-  private final long seed;
-  private final int segmentLength;
-  private final int segmentLengthMask;
-  private final long segmentCountLength;
-  private final long[] data;
-
-  private ConstMap(ConstMaps.Params params, long[] data) {
-    this.params = params;
-    this.seed = params.seed();
-    this.segmentLength = params.segmentLength();
-    this.segmentLengthMask = params.segmentLengthMask();
-    this.segmentCountLength = params.segmentCountLength();
-    this.data = data;
-  }
+public sealed interface ConstMap permits HeapConstMap, BufferConstMap {
 
   /**
    * Builds a map from string keys and their values: {@code keys.get(i)} maps to
@@ -49,13 +39,13 @@ public final class ConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static ConstMap build(List<String> keys, long[] values) {
+  static ConstMap build(List<String> keys, long[] values) {
     ConstMaps.checkLengths(keys.size(), values.length);
-    return buildFromHashes(ConstMaps.hashStrings(keys), values);
+    return HeapConstMap.build(ConstMaps.hashStrings(keys), values);
   }
 
   /**
@@ -64,13 +54,13 @@ public final class ConstMap {
    *
    * @param keys the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two keys are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static ConstMap buildFromBytes(List<byte[]> keys, long[] values) {
+  static ConstMap buildFromBytes(List<byte[]> keys, long[] values) {
     ConstMaps.checkLengths(keys.size(), values.length);
-    return buildFromHashes(ConstMaps.hashBytes(keys), values);
+    return HeapConstMap.build(ConstMaps.hashBytes(keys), values);
   }
 
   /**
@@ -79,19 +69,62 @@ public final class ConstMap {
    *
    * @param keyHashes the XXH64 hashes (seed 0) of the keys, distinct
    * @param values the values, one per key
-   * @return the map
+   * @return the on-heap map
    * @throws IllegalArgumentException if the lengths differ, if two hashes are equal (detected
    *     with high probability), or if there are too many keys for one map
    */
-  public static ConstMap buildFromHashes(long[] keyHashes, long[] values) {
+  static ConstMap buildFromHashes(long[] keyHashes, long[] values) {
     ConstMaps.checkLengths(keyHashes.length, values.length);
-    if (keyHashes.length == 0) {
-      return new ConstMap(ConstMaps.Params.EMPTY, new long[0]);
-    }
-    ConstMaps.Peeled p = ConstMaps.peel(keyHashes);
-    long[] data = new long[p.params().arrayLength()];
-    ConstMaps.assign(p, values, data, null);
-    return new ConstMap(p.params(), data);
+    return HeapConstMap.build(keyHashes, values);
+  }
+
+  /**
+   * Reads a serialized map starting at the buffer's position into a new on-heap map, after
+   * validating its header and checksum. Accepts both the {@code CMAP0001} format (Go, Rust,
+   * this library) and fastconstmap's {@code CMAP0003}, which adds a key count that is
+   * ignored. The buffer's position is not changed.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is not a valid {@code ConstMap} (including a
+   *     {@code VerifiedConstMap} or {@code PairedVerifiedConstMap}, or a file from
+   *     fastconstmap 0.9 or earlier, which used another hash), or is corrupt
+   */
+  static ConstMap load(ByteBuffer buffer) {
+    return HeapConstMap.read(buffer);
+  }
+
+  /**
+   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
+   *
+   * @param bytes the serialized map
+   * @return the on-heap map
+   * @throws InvalidFilterException if the input is invalid or corrupt
+   */
+  static ConstMap load(byte[] bytes) {
+    return load(ByteBuffer.wrap(bytes));
+  }
+
+  /**
+   * Returns a map that queries the serialized map starting at the buffer's position directly,
+   * without copying it. The buffer may be on the heap, direct or a
+   * {@link java.nio.MappedByteBuffer}; its position, limit and byte order are not changed. It
+   * reads the same formats as {@link #load(ByteBuffer)} ({@code CMAP0001} and
+   * {@code CMAP0003}), at any offset: there is no alignment requirement.
+   *
+   * <p>This method runs in constant time: it validates the header (magic bytes, segment
+   * parameters consistent with the array length, and a buffer long enough for the whole map)
+   * but does not verify the checksum, which would read the whole map; use
+   * {@link #load(ByteBuffer)} for that. A view answers like the on-heap map as long as the
+   * buffer's bytes are not modified; on corrupt bytes it returns wrong values but never reads
+   * outside the map.
+   *
+   * @param buffer a buffer holding a serialized map at its position
+   * @return a view backed by the buffer
+   * @throws InvalidFilterException if the header is invalid or the buffer is too short
+   */
+  static ConstMap wrap(ByteBuffer buffer) {
+    return BufferConstMap.wrap(buffer);
   }
 
   /**
@@ -101,16 +134,7 @@ public final class ConstMap {
    * @param keyHash the XXH64 hash of the key
    * @return the value if the key is in the map, an arbitrary value otherwise
    */
-  public long getByHash(long keyHash) {
-    if (data.length == 0) {
-      return 0;
-    }
-    long hash = ConstMaps.mixsplit(keyHash, seed);
-    int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-    int h1 = (h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask);
-    int h2 = (h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask);
-    return data[h0] ^ data[h1] ^ data[h2];
-  }
+  long getByHash(long keyHash);
 
   /**
    * Returns the value of a string key (hashed through its UTF-8 encoding).
@@ -118,7 +142,7 @@ public final class ConstMap {
    * @param key the key
    * @return the value if the key is in the map, an arbitrary value otherwise
    */
-  public long get(String key) {
+  default long get(String key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -128,7 +152,7 @@ public final class ConstMap {
    * @param key the key
    * @return the value if the key is in the map, an arbitrary value otherwise
    */
-  public long get(byte[] key) {
+  default long get(byte[] key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -141,7 +165,7 @@ public final class ConstMap {
    * @return the value if the key is in the map, an arbitrary value otherwise
    * @throws IndexOutOfBoundsException if the range is not within the array
    */
-  public long get(byte[] key, int off, int len) {
+  default long get(byte[] key, int off, int len) {
     return getByHash(XxHash64.hash(key, off, len));
   }
 
@@ -152,7 +176,7 @@ public final class ConstMap {
    * @param key the key
    * @return the value if the key is in the map, an arbitrary value otherwise
    */
-  public long get(ByteBuffer key) {
+  default long get(ByteBuffer key) {
     return getByHash(XxHash64.hash(key));
   }
 
@@ -166,32 +190,7 @@ public final class ConstMap {
    * @param dst where the values go; only the first {@code keys.size()} entries are written
    * @throws IndexOutOfBoundsException if {@code dst} is shorter than {@code keys}
    */
-  public void getMany(List<String> keys, long[] dst) {
-    int n = keys.size();
-    Objects.checkFromIndexSize(0, n, dst.length);
-    if (data.length == 0) {
-      java.util.Arrays.fill(dst, 0, n, 0);
-      return;
-    }
-    final long[] d = data;
-    final int[] h = new int[3 * BLOCK];
-    for (int start = 0; start < n; start += BLOCK) {
-      int m = Math.min(BLOCK, n - start);
-      for (int j = 0; j < m; j++) {
-        long hash = ConstMaps.mixsplit(XxHash64.hash(keys.get(start + j)), seed);
-        int h0 = (int) Math.unsignedMultiplyHigh(hash, segmentCountLength);
-        h[3 * j] = h0;
-        h[3 * j + 1] = (h0 + segmentLength) ^ ((int) (hash >>> 18) & segmentLengthMask);
-        h[3 * j + 2] = (h0 + 2 * segmentLength) ^ ((int) hash & segmentLengthMask);
-      }
-      for (int j = 0; j < m; j++) {
-        dst[start + j] = d[h[3 * j]] ^ d[h[3 * j + 1]] ^ d[h[3 * j + 2]];
-      }
-    }
-  }
-
-  /** Keys per block in {@link #getMany}. */
-  static final int BLOCK = 8;
+  void getMany(List<String> keys, long[] dst);
 
   /**
    * Looks up many string keys at once, as {@link #getMany(List, long[])} does, into a new
@@ -200,7 +199,7 @@ public final class ConstMap {
    * @param keys the keys
    * @return the values, one per key
    */
-  public long[] getMany(List<String> keys) {
+  default long[] getMany(List<String> keys) {
     long[] dst = new long[keys.size()];
     getMany(keys, dst);
     return dst;
@@ -212,76 +211,39 @@ public final class ConstMap {
    *
    * @return the array length
    */
-  public int arrayLength() {
-    return data.length;
-  }
+  int arrayLength();
 
   /**
-   * Returns the number of bytes written by {@link #serialize(ByteBuffer)}: a 28-byte header,
-   * the array, and an 8-byte checksum.
+   * Returns the number of bytes written by {@link #serialize(ByteBuffer)}: for an on-heap map,
+   * a 28-byte header, the array and an 8-byte checksum; for a view, the size of the
+   * serialized map it wraps.
    *
    * @return the serialized size in bytes
    */
-  public int serializedSize() {
-    return ConstMaps.CMAP_HEADER + 8 * data.length + 8;
-  }
+  int serializedSize();
 
   /**
-   * Writes the map at the buffer's current position, in the {@code CMAP0001} format shared
-   * with the Go, Rust and C implementations, and advances the position by
-   * {@link #serializedSize()}. The buffer's byte order is ignored and left unchanged.
+   * Writes the map at the buffer's current position and advances the position by
+   * {@link #serializedSize()}. An on-heap map writes the {@code CMAP0001} format shared with
+   * the Go, Rust and C implementations; a view writes the bytes it wraps, unchanged (so a
+   * {@code CMAP0003} file from fastconstmap stays one). The buffer's byte order is ignored
+   * and left unchanged.
    *
    * @param out the destination
    * @throws java.nio.BufferOverflowException if fewer than {@link #serializedSize()} bytes
    *     remain
    * @throws java.nio.ReadOnlyBufferException if the buffer is read-only
    */
-  public void serialize(ByteBuffer out) {
-    ConstMaps.write(out, ConstMaps.MAGIC_CMAP, params, data.length, false, data);
-  }
+  void serialize(ByteBuffer out);
 
   /**
    * Returns the serialized form of the map, as written by {@link #serialize(ByteBuffer)}.
    *
    * @return a new array of {@link #serializedSize()} bytes
    */
-  public byte[] toByteArray() {
+  default byte[] toByteArray() {
     byte[] bytes = new byte[serializedSize()];
     serialize(ByteBuffer.wrap(bytes));
     return bytes;
-  }
-
-  /**
-   * Reads a serialized map starting at the buffer's position into a new on-heap map, after
-   * validating its header and checksum. Accepts both the {@code CMAP0001} format (Go, Rust,
-   * this class) and fastconstmap's {@code CMAP0003}, which adds a key count that is ignored.
-   * The buffer's position is not changed.
-   *
-   * @param buffer a buffer holding a serialized map at its position
-   * @return the map
-   * @throws InvalidFilterException if the input is not a valid {@code ConstMap} (including a
-   *     {@code VerifiedConstMap} or {@code PairedVerifiedConstMap}, or a file from
-   *     fastconstmap 0.9 or earlier, which used another hash), or is corrupt
-   */
-  public static ConstMap load(ByteBuffer buffer) {
-    ConstMaps.Header h = ConstMaps.read(buffer, ConstMaps.Kind.CONST, 1);
-    int n = h.params().arrayLength();
-    return new ConstMap(h.params(), ConstMaps.readWords(buffer, h.start(), n));
-  }
-
-  /**
-   * Reads a serialized map, as {@link #load(ByteBuffer)} does.
-   *
-   * @param bytes the serialized map
-   * @return the map
-   * @throws InvalidFilterException if the input is invalid or corrupt
-   */
-  public static ConstMap load(byte[] bytes) {
-    return load(ByteBuffer.wrap(bytes));
-  }
-
-  @Override
-  public String toString() {
-    return "ConstMap{words=" + data.length + ", bytes=" + serializedSize() + "}";
   }
 }

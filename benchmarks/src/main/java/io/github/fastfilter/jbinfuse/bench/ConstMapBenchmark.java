@@ -3,6 +3,12 @@ package io.github.fastfilter.jbinfuse.bench;
 import io.github.fastfilter.jbinfuse.ConstMap;
 import io.github.fastfilter.jbinfuse.PairedVerifiedConstMap;
 import io.github.fastfilter.jbinfuse.VerifiedConstMap;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.SplittableRandom;
@@ -41,6 +47,13 @@ public class ConstMapBenchmark {
   @Param({"const", "verified", "paired"})
   String kind;
 
+  /**
+   * Where the map lives: on the heap, or a view ({@code wrap}) of its serialized bytes in a
+   * direct buffer or a memory-mapped temporary file.
+   */
+  @Param({"heap", "direct", "mapped"})
+  String storage;
+
   ConstMap cm;
   VerifiedConstMap vm;
   PairedVerifiedConstMap pm;
@@ -48,7 +61,7 @@ public class ConstMapBenchmark {
   long[] out;
 
   @Setup
-  public void setup() {
+  public void setup() throws IOException {
     List<String> keys = new ArrayList<>(size);
     long[] values = new long[size];
     for (int i = 0; i < size; i++) {
@@ -59,6 +72,30 @@ public class ConstMapBenchmark {
       case "const" -> cm = ConstMap.build(keys, values);
       case "verified" -> vm = VerifiedConstMap.build(keys, values);
       default -> pm = PairedVerifiedConstMap.build(keys, values);
+    }
+    if (!storage.equals("heap")) {
+      byte[] bytes = switch (kind) {
+        case "const" -> cm.toByteArray();
+        case "verified" -> vm.toByteArray();
+        default -> pm.toByteArray();
+      };
+      ByteBuffer buf;
+      if (storage.equals("direct")) {
+        buf = ByteBuffer.allocateDirect(bytes.length);
+        buf.put(bytes).flip();
+      } else {
+        Path file = Files.createTempFile("constmap", ".bin");
+        file.toFile().deleteOnExit();
+        Files.write(file, bytes);
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
+          buf = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+        }
+      }
+      switch (kind) {
+        case "const" -> cm = ConstMap.wrap(buf);
+        case "verified" -> vm = VerifiedConstMap.wrap(buf);
+        default -> pm = PairedVerifiedConstMap.wrap(buf);
+      }
     }
     SplittableRandom r = new SplittableRandom(size);
     queries = new ArrayList<>(QUERIES);
