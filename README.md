@@ -140,7 +140,7 @@ for example for many large filters.
 
 | Type | Members |
 | --- | --- |
-| `BinaryFuse8`, `BinaryFuse16` | `build(long[])`, `buildFromBytes(Collection<byte[]>)` |
+| `BinaryFuse8`, `BinaryFuse16` | `build(long[])`, `build(long[], int)`, `buildFromBytes(Collection<byte[]>)` |
 | `BinaryFuseFilter` (interface) | `contains(long)`, `contains(byte[])`, `contains(byte[], int, int)`, `contains(ByteBuffer)`, `fingerprintBits()`, `keyCount()`, `serializedSize()`, `serialize(ByteBuffer)`, `toByteArray()`; static `wrap(ByteBuffer)`, `load(ByteBuffer)`, `load(byte[])` |
 | `WyHash` | `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)`, `hash64(long, long)` |
 | `InvalidFilterException` | thrown for corrupt or invalid serialized input |
