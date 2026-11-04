@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>io.github.fastfilter</groupId>
   <artifactId>jbinfuse</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+  <version>0.0.1</version>
   <packaging>jar</packaging>
 
   <name>jbinfuse</name>
@@ -39,7 +39,7 @@
     <connection>scm:git:https://github.com/FastFilter/jbinfuse.git</connection>
     <url>scm:git:https://github.com/FastFilter/jbinfuse.git</url>
     <developerConnection>scm:git:https://github.com/FastFilter/jbinfuse.git</developerConnection>
-    <tag>HEAD</tag>
+    <tag>v0.0.1</tag>
   </scm>
 
   <issueManagement>
