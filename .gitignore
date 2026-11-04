@@ -1,0 +1,9 @@
+target/
+release.properties
+pom.xml.releaseBackup
+pom.xml.tag
+pom.xml.next
+*.iml
+.idea/
+.vscode/
+.DS_Store

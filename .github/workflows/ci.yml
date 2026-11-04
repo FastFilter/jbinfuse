@@ -1,0 +1,27 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        java: [21, 25]
+        include:
+          - os: macos-latest
+            java: 21
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+          cache: maven
+      - name: Build and test (with javadoc and sources jars)
+        run: ./mvnw -B package
+      - name: Compile benchmarks
+        run: ./mvnw -B -f benchmarks/pom.xml package
