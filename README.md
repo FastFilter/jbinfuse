@@ -16,9 +16,9 @@ filters for the same false-positive rate, and a query reads exactly three memory
 - 64-bit keys, or byte-array keys hashed with [wyhash](https://github.com/wangyi-fudan/wyhash)
   (bit-exact with the C reference, final version 4.3).
 - A versioned, checksummed, little-endian serialization format.
-- **Off-heap queries**: query a serialized filter in place from a `ByteBuffer` (heap, direct,
-  or a `MappedByteBuffer` of a file) without copying it to the heap. Views and on-heap filters
-  always give identical answers.
+- On-heap filters (`BinaryFuse8`, `BinaryFuse16`) are the fast, recommended query path.
+  A serialized filter can also be queried in place from a `ByteBuffer` (for example a
+  memory-mapped file); that saves heap but is slower (see [Performance](#performance)).
 
 ## Maven
 
@@ -75,20 +75,31 @@ Byte keys are hashed to 64 bits with `WyHash.hash(bytes)` (seed 0), so
 `contains(bytes) == contains(WyHash.hash(bytes))`. You can hash keys yourself (for example
 while streaming them) and call `BinaryFuse8.build(long[])` with the hashes.
 
-### Serialize to a file
+### Save to a file and load it back
 
 ```java
 import java.nio.file.Files;
 import java.nio.file.Path;
 
 Files.write(Path.of("filter.bin"), filter.toByteArray());
+
+BinaryFuseFilter loaded = BinaryFuseFilter.load(Files.readAllBytes(Path.of("filter.bin")));
+loaded.contains(42);
 ```
+
+`load` copies the filter to the heap after full validation (magic bytes, format version,
+variant, parameters, and CRC32C checksums of the header and of the fingerprints) and throws
+`InvalidFilterException` on corrupt or invalid input. This is the recommended way to use a
+saved filter: on-heap filters are the fast query path.
 
 `filter.serialize(ByteBuffer)` writes into any buffer (for example a writable
 `MappedByteBuffer`, or at an offset inside a larger file); `filter.serializedSize()` tells you
-how many bytes it needs.
+how many bytes it needs. `load(ByteBuffer)` reads from the buffer's position.
 
-### Query off-heap from a memory-mapped file
+### Querying in place (saves heap, costs latency)
+
+`BinaryFuseFilter.wrap(ByteBuffer)` returns a view that queries the serialized bytes in place,
+without copying them, from a heap, direct or memory-mapped buffer:
 
 ```java
 import java.nio.MappedByteBuffer;
@@ -102,12 +113,14 @@ try (FileChannel ch = FileChannel.open(Path.of("filter.bin"), StandardOpenOption
 }
 ```
 
-The mapping stays valid after the channel is closed. `wrap` checks the header (magic bytes,
-format version, variant, parameters, a header checksum, and that the buffer is long enough)
-in constant time, so opening a large filter is instant. `BinaryFuseFilter.load(ByteBuffer)` or
-`load(byte[])` instead copies the filter to the heap after full validation, including a
-CRC32C checksum of the fingerprints. Both throw `InvalidFilterException` on corrupt or
-invalid input.
+Use it only when heap is the constraint. **A memory-mapped filter trades query latency for
+heap:** in end-to-end primary-key lookups in Lucene on a Xeon Gold 6548N, reading fingerprints
+from a mapped file was about 7 ns slower per probe than an on-heap array (10-25% slower lookups
+for absent keys, about 7% slower at 100 million keys). A plausible but unverified cause is TLB
+misses on 4 KiB page-cache pages, whereas a large Java heap typically uses 2 MiB transparent
+huge pages. Views give exactly the same answers as on-heap filters. `wrap` validates the header
+(including its checksum) in constant time but does not checksum the fingerprints; the view is
+valid only as long as the buffer's bytes are not modified.
 
 ## API summary
 
@@ -118,8 +131,7 @@ invalid input.
 | `WyHash` | `hash(byte[])`, `hash(byte[], int, int)`, `hash(byte[], int, int, long)`, `hash(ByteBuffer)`, `hash(ByteBuffer, int, int, long)`, `hash64(long, long)` |
 | `InvalidFilterException` | thrown for corrupt or invalid serialized input |
 
-All filters are immutable and safe for concurrent queries. A view returned by `wrap` is valid
-as long as the bytes of its buffer are not modified.
+All filters are immutable and safe for concurrent queries.
 
 ## Size and false-positive rate
 
@@ -149,6 +161,11 @@ queries half hits and half misses:
 | `contains(long)`, 8-bit view of a direct `ByteBuffer` | 5.0 ns | 8.3 ns |
 | `contains(long)`, 16-bit view of a direct `ByteBuffer` | 7.4 ns | 8.6 ns |
 | construction, 8-bit or 16-bit | 48 ms (48 ns/key) | 550 ms (55 ns/key) |
+
+On-heap filters are the fastest. Even in this microbenchmark, where the whole filter is hot,
+views over a direct `ByteBuffer` are 0.6 to 1 ns slower per query; with a memory-mapped file
+in a real application the gap was larger, about 7 ns per probe (see
+[Querying in place](#querying-in-place-saves-heap-costs-latency)).
 
 Hashing a 16-byte key with `WyHash.hash` takes about 5.4 ns (8 bytes: 5.3 ns, 32 bytes:
 6.8 ns, 100 bytes: 11.5 ns).
