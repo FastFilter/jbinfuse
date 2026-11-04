@@ -7,7 +7,7 @@
   <packaging>jar</packaging>
 
   <name>jbinfuse</name>
-  <description>Small, fast binary fuse filters (8-bit and 16-bit) for Java, queryable off-heap from serialized bytes.</description>
+  <description>Small, fast binary fuse filters (8-bit and 16-bit) for Java, queryable off-heap from serialized bytes, and constant maps from keys to 64-bit values compatible with constmap (Go), rsconstmap (Rust) and fastconstmap (C/Python).</description>
   <url>https://github.com/FastFilter/jbinfuse</url>
 
   <properties>
