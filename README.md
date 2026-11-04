@@ -16,9 +16,10 @@ filters for the same false-positive rate, and a query reads exactly three memory
 - 64-bit keys, or byte-array keys hashed with [wyhash](https://github.com/wangyi-fudan/wyhash)
   (bit-exact with the C reference, final version 4.3).
 - A versioned, checksummed, little-endian serialization format.
-- On-heap filters (`BinaryFuse8`, `BinaryFuse16`) are the fast, recommended query path.
-  A serialized filter can also be queried in place from a `ByteBuffer` (for example a
-  memory-mapped file); that saves heap but is slower (see [Performance](#performance)).
+- Two query modes with identical answers: **on-heap** filters (`BinaryFuse8`,
+  `BinaryFuse16`), the fastest; and **in-place views** of a serialized filter in a
+  `ByteBuffer` (heap, direct, or a memory-mapped file), with near-zero heap use and instant
+  open. See [Choosing a query mode](#choosing-a-query-mode).
 
 ## Maven
 
@@ -89,14 +90,14 @@ loaded.contains(42);
 
 `load` copies the filter to the heap after full validation (magic bytes, format version,
 variant, parameters, and CRC32C checksums of the header and of the fingerprints) and throws
-`InvalidFilterException` on corrupt or invalid input. This is the recommended way to use a
-saved filter: on-heap filters are the fast query path.
+`InvalidFilterException` on corrupt or invalid input. On-heap filters are the default and the
+fastest query path.
 
 `filter.serialize(ByteBuffer)` writes into any buffer (for example a writable
 `MappedByteBuffer`, or at an offset inside a larger file); `filter.serializedSize()` tells you
 how many bytes it needs. `load(ByteBuffer)` reads from the buffer's position.
 
-### Querying in place (saves heap, costs latency)
+### Query in place from a memory-mapped file
 
 `BinaryFuseFilter.wrap(ByteBuffer)` returns a view that queries the serialized bytes in place,
 without copying them, from a heap, direct or memory-mapped buffer:
@@ -113,14 +114,27 @@ try (FileChannel ch = FileChannel.open(Path.of("filter.bin"), StandardOpenOption
 }
 ```
 
-Use it only when heap is the constraint. **A memory-mapped filter trades query latency for
-heap:** in end-to-end primary-key lookups in Lucene on a Xeon Gold 6548N, reading fingerprints
-from a mapped file was about 7 ns slower per probe than an on-heap array (10-25% slower lookups
-for absent keys, about 7% slower at 100 million keys). A plausible but unverified cause is TLB
+The mapping stays valid after the channel is closed. `wrap` validates the header (including
+its checksum) in constant time but does not checksum the fingerprints; the view is valid only
+as long as the buffer's bytes are not modified. Views give exactly the same answers as
+on-heap filters (this is tested, including over memory-mapped files).
+
+### Choosing a query mode
+
+| | on-heap (`build`, `load`) | in place (`wrap`) |
+| --- | --- | --- |
+| query latency | fastest | slower: about +7 ns per probe from a mapped file |
+| heap use | the whole filter (about 1.1 or 2.3 bytes per key) | near zero |
+| opening a saved filter | reads and checksums the whole file | instant (constant time) |
+| validation | full (header and fingerprint checksums) | header only |
+
+On-heap is the default and what the examples use. In end-to-end primary-key lookups in Lucene
+on a Xeon Gold 6548N, reading fingerprints from a memory-mapped file cost about 7 ns more per
+probe than an on-heap array: about 25% slower for absent keys across 8 segments, 10-20% in a
+single segment, and about 7% at 100 million keys. (A plausible but unverified cause is TLB
 misses on 4 KiB page-cache pages, whereas a large Java heap typically uses 2 MiB transparent
-huge pages. Views give exactly the same answers as on-heap filters. `wrap` validates the header
-(including its checksum) in constant time but does not checksum the fingerprints; the view is
-valid only as long as the buffer's bytes are not modified.
+huge pages.) Choose `wrap` when heap memory or open time matters more than those nanoseconds,
+for example for many large filters.
 
 ## API summary
 
@@ -165,7 +179,7 @@ queries half hits and half misses:
 On-heap filters are the fastest. Even in this microbenchmark, where the whole filter is hot,
 views over a direct `ByteBuffer` are 0.6 to 1 ns slower per query; with a memory-mapped file
 in a real application the gap was larger, about 7 ns per probe (see
-[Querying in place](#querying-in-place-saves-heap-costs-latency)).
+[Choosing a query mode](#choosing-a-query-mode)).
 
 Hashing a 16-byte key with `WyHash.hash` takes about 5.4 ns (8 bytes: 5.3 ns, 32 bytes:
 6.8 ns, 100 bytes: 11.5 ns).

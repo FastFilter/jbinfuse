@@ -13,8 +13,8 @@ import java.nio.ByteBuffer;
  *       their {@code build} methods or copied from serialized bytes with {@link #load};</li>
  *   <li>views returned by {@link #wrap(ByteBuffer)}, which query serialized bytes in place
  *       (a heap buffer, a direct buffer or a {@link java.nio.MappedByteBuffer} of a file)
- *       without copying them. Views save heap memory at the cost of slower queries; on-heap
- *       filters are the recommended, fast path.</li>
+ *       without copying them. Views use almost no heap and open instantly; on-heap filters
+ *       answer queries faster.</li>
  * </ul>
  *
  * <p>Byte-array keys are first hashed to 64 bits with {@link WyHash#hash(byte[])}; the
@@ -122,8 +122,8 @@ public sealed interface BinaryFuseFilter
    * directly, without copying it. The buffer may be on the heap, direct or a
    * {@link java.nio.MappedByteBuffer}; its position, limit and byte order are not changed.
    *
-   * <p>Prefer {@link #load} for querying: on-heap filters are faster. A view saves heap
-   * memory but each query is slower, noticeably so for a memory-mapped file (several
+   * <p>A view uses almost no heap and opens instantly, but queries are slower than with an
+   * on-heap filter from {@link #load}, noticeably so for a memory-mapped file (several
    * nanoseconds per query in our measurements).
    *
    * <p>This method runs in constant time: it validates the header (magic bytes, format
