@@ -38,12 +38,28 @@ public final class BinaryFuse8 implements BinaryFuseFilter {
    * @throws IllegalArgumentException if there are too many keys for one filter
    */
   public static BinaryFuse8 build(long[] keys) {
-    Fuse.Layout layout = Fuse.Layout.forSize(keys.length, 8);
+    return build(keys, keys.length);
+  }
+
+  /**
+   * Builds a filter containing the first {@code length} keys of the array, for example when
+   * the array was filled only partially. Otherwise identical to {@link #build(long[])}: the
+   * array is not modified and duplicate keys are allowed.
+   *
+   * @param keys the array holding the keys
+   * @param length the number of keys, from index 0
+   * @return the filter
+   * @throws IndexOutOfBoundsException if {@code length} is negative or larger than the array
+   * @throws IllegalArgumentException if there are too many keys for one filter
+   */
+  public static BinaryFuse8 build(long[] keys, int length) {
+    java.util.Objects.checkFromIndexSize(0, length, keys.length);
+    Fuse.Layout layout = Fuse.Layout.forSize(length, 8);
     byte[] fp = new byte[layout.arrayLength()];
-    if (keys.length == 0) {
+    if (length == 0) {
       return new BinaryFuse8(0, 0, layout, fp);
     }
-    Fuse.Peeled p = Fuse.peel(keys, layout);
+    Fuse.Peeled p = Fuse.peel(keys, length, layout);
     final long[] order = p.reverseOrder();
     final byte[] which = p.reverseH();
     final int len = layout.segmentLength();

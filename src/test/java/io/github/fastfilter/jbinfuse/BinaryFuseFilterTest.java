@@ -3,6 +3,7 @@ package io.github.fastfilter.jbinfuse;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -446,12 +447,12 @@ class BinaryFuseFilterTest {
   void fewConstructionAttempts() {
     int worst = 0;
     for (int n = 1; n <= 3000; n++) {
-      worst = Math.max(worst, Fuse.peel(randomKeys(n, ~n), Fuse.Layout.forSize(n, 8)).attempts());
+      worst = Math.max(worst, Fuse.peel(randomKeys(n, ~n), n, Fuse.Layout.forSize(n, 8)).attempts());
     }
     for (int n : new int[] {10_000, 100_000, 1_000_000}) {
       for (int s = 0; s < 3; s++) {
         worst = Math.max(worst,
-            Fuse.peel(randomKeys(n, n + s), Fuse.Layout.forSize(n, 8)).attempts());
+            Fuse.peel(randomKeys(n, n + s), n, Fuse.Layout.forSize(n, 8)).attempts());
       }
     }
     assertTrue(worst <= 4, "needed " + worst + " attempts");
@@ -482,5 +483,45 @@ class BinaryFuseFilterTest {
     BinaryFuseFilter view = BinaryFuseFilter.wrap(buf);
     buf.position(100).limit(200).order(ByteOrder.LITTLE_ENDIAN);
     assertSameAnswers(f, view, 50_000, 3);
+  }
+
+  @Test
+  void buildFromPrefixOfArray() {
+    long[] keys = randomKeys(10_000, 7);
+    for (int length : new int[] {0, 1, 2, 999, 10_000}) {
+      long[] prefix = java.util.Arrays.copyOf(keys, length);
+      long[] before = keys.clone();
+      assertArrayEquals(
+          BinaryFuse8.build(prefix).toByteArray(), BinaryFuse8.build(keys, length).toByteArray());
+      assertArrayEquals(
+          BinaryFuse16.build(prefix).toByteArray(), BinaryFuse16.build(keys, length).toByteArray());
+      assertArrayEquals(before, keys);
+    }
+    assertThrows(IndexOutOfBoundsException.class, () -> BinaryFuse8.build(keys, -1));
+    assertThrows(IndexOutOfBoundsException.class, () -> BinaryFuse16.build(keys, keys.length + 1));
+  }
+
+  @Test
+  void seedSequenceAvoidsDegenerateSeed() {
+    // WyHash.hash64(key, seed) maps every key to the same value if seed == P1.
+    long p1 = 0x8bb84b93962eacc9L;
+    long rng = Fuse.RNG_START;
+    for (int attempt = 0; attempt < Fuse.MAX_ATTEMPTS; attempt++) {
+      rng += Fuse.SPLITMIX_GAMMA;
+      assertNotEquals(p1, Fuse.splitmix64(rng));
+    }
+  }
+
+  @Test
+  void degenerateKeyIsHarmless() {
+    // WyHash.hash64(P0, seed) does not depend on the seed.
+    long p0 = 0x2d358dccaa6c78a5L;
+    long[] keys = randomKeys(1000, 3);
+    keys[500] = p0;
+    for (BinaryFuseFilter f : new BinaryFuseFilter[] {BinaryFuse8.build(keys), BinaryFuse16.build(keys)}) {
+      for (long key : keys) {
+        assertTrue(f.contains(key));
+      }
+    }
   }
 }

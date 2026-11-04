@@ -66,7 +66,16 @@ final class Fuse {
 
   // ------------------------------------------------------------- hashing
 
-  /** Hashes a 64-bit key with the filter seed. */
+  /**
+   * Hashes a 64-bit key with the filter seed. This function is part of serialization format
+   * version 1: changing it would make existing filters return false negatives.
+   *
+   * <p>{@code WyHash.hash64(a, b)} multiplies {@code a ^ P0} by {@code b ^ P1}, so it has two
+   * degenerate inputs. The key {@code P0} hashes to the same value for every seed, which is
+   * harmless: a single key cannot make construction fail. A seed equal to {@code P1} would hash
+   * every key to the same value; the seeds come from a fixed sequence, and a test checks that its
+   * first {@link #MAX_ATTEMPTS} values are all different from {@code P1}.
+   */
   static long hash(long key, long seed) {
     return WyHash.hash64(key, seed);
   }
@@ -78,9 +87,9 @@ final class Fuse {
     return z ^ (z >>> 31);
   }
 
-  private static final long SPLITMIX_GAMMA = 0x9e3779b97f4a7c15L;
+  static final long SPLITMIX_GAMMA = 0x9e3779b97f4a7c15L;
   /** Initial RNG state, as in the C reference. */
-  private static final long RNG_START = 0x726b2b9d438b9d4dL;
+  static final long RNG_START = 0x726b2b9d438b9d4dL;
 
   // -------------------------------------------------------- construction
 
@@ -91,12 +100,11 @@ final class Fuse {
   record Peeled(long seed, int size, long[] reverseOrder, byte[] reverseH, int attempts) {}
 
   /**
-   * Runs the binary fuse construction (hash, bucket by segment, peel) over the keys. The input
-   * array is not modified. Keys are not sorted unless an attempt fails, in which case a sorted,
-   * deduplicated copy is used for the remaining attempts.
+   * Runs the binary fuse construction (hash, bucket by segment, peel) over the first {@code
+   * size} keys. The input array is not modified. Keys are not sorted unless an attempt fails, in
+   * which case a sorted, deduplicated copy is used for the remaining attempts.
    */
-  static Peeled peel(long[] keys, Layout layout) {
-    int size = keys.length;
+  static Peeled peel(long[] keys, int size, Layout layout) {
     final int capacity = layout.arrayLength();
     final int segmentLength = layout.segmentLength();
     final int mask = layout.segmentLengthMask();
@@ -121,7 +129,7 @@ final class Fuse {
       final long seed = splitmix64(rng);
       if (attempt > 0) {
         if (!deduplicated) {
-          keys = sortedDistinct(keys);
+          keys = sortedDistinct(keys, size);
           deduplicated = true;
           size = keys.length;
           reverseOrder[size] = 1;
@@ -232,9 +240,9 @@ final class Fuse {
         "binary fuse construction failed after " + MAX_ATTEMPTS + " attempts");
   }
 
-  /** Returns a sorted copy of the keys without duplicates. */
-  static long[] sortedDistinct(long[] keys) {
-    long[] copy = keys.clone();
+  /** Returns a sorted copy of the first {@code size} keys, without duplicates. */
+  static long[] sortedDistinct(long[] keys, int size) {
+    long[] copy = Arrays.copyOf(keys, size);
     Arrays.sort(copy);
     int n = 0;
     for (int i = 0; i < copy.length; i++) {

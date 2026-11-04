@@ -37,7 +37,7 @@
 
   <scm>
     <connection>scm:git:https://github.com/FastFilter/jbinfuse.git</connection>
-    <url>scm:git:https://github.com/FastFilter/jbinfuse.git</url>
+    <url>https://github.com/FastFilter/jbinfuse</url>
     <developerConnection>scm:git:https://github.com/FastFilter/jbinfuse.git</developerConnection>
     <tag>HEAD</tag>
   </scm>
@@ -53,6 +53,9 @@
       <name>Sonatype Central Portal</name>
       <url>https://central.sonatype.com/repository/maven-snapshots/</url>
     </snapshotRepository>
+    <!-- Releases are deployed through Njord (see .github/workflows/release.yml), which uses this
+         repository's id to find the Central Portal publisher in the settings. Following Njord's
+         convention, the URL is where released artifacts end up: Maven Central. -->
     <repository>
       <id>sonatype-central-portal</id>
       <name>Sonatype Central Portal</name>
