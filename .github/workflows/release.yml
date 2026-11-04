@@ -34,8 +34,26 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
-          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      # Imports the signing key. Equivalent to setup-java's gpg-private-key input, but also
+      # accepts a secret that holds the ASCII-armored key without its BEGIN/END lines.
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          KEY_FILE=$(mktemp)
+          printf '%s\n' "$GPG_PRIVATE_KEY" > "$KEY_FILE"
+          if ! grep -q -- '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$KEY_FILE"; then
+            echo "GPG_PRIVATE_KEY has no armor header; adding BEGIN/END lines"
+            { echo '-----BEGIN PGP PRIVATE KEY BLOCK-----'
+              if ! head -1 "$KEY_FILE" | grep -q ':'; then echo; fi
+              cat "$KEY_FILE"
+              echo '-----END PGP PRIVATE KEY BLOCK-----'; } > "$KEY_FILE.asc"
+            mv "$KEY_FILE.asc" "$KEY_FILE"
+          fi
+          gpg --batch --import "$KEY_FILE"
+          rm -f "$KEY_FILE"
+          gpg --list-secret-keys --keyid-format long | grep -c '^sec' | xargs echo "secret keys imported:"
 
       - name: Configure git
         run: |
