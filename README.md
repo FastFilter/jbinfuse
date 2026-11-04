@@ -30,14 +30,15 @@ filters for the same false-positive rate, and a query reads exactly three memory
 <dependency>
   <groupId>me.lemire.fastfilter</groupId>
   <artifactId>jbinfuse</artifactId>
-  <version>0.0.2</version>
+  <version>0.1.0</version>
 </dependency>
 ```
 
-Gradle: `implementation("me.lemire.fastfilter:jbinfuse:0.0.2")`
+Gradle: `implementation("me.lemire.fastfilter:jbinfuse:0.1.0")`
 
-Version 0.0.2 is the first version published to Maven Central. Version 0.0.1 was tagged but
-never published: Central rejected its `io.github.fastfilter` groupId.
+Version 0.1.0 adds the constant maps (`ConstMap`, `VerifiedConstMap`, `PairedVerifiedConstMap`)
+and `XxHash64`. Version 0.0.2 was the first version published to Maven Central. Version 0.0.1
+was tagged but never published: Central rejected its `io.github.fastfilter` groupId.
 
 Requires Java 21 or later.
 
