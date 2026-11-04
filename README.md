@@ -25,13 +25,16 @@ filters for the same false-positive rate, and a query reads exactly three memory
 
 ```xml
 <dependency>
-  <groupId>io.github.fastfilter</groupId>
+  <groupId>me.lemire.fastfilter</groupId>
   <artifactId>jbinfuse</artifactId>
-  <version>0.0.1</version>
+  <version>0.0.2</version>
 </dependency>
 ```
 
-Gradle: `implementation("io.github.fastfilter:jbinfuse:0.0.1")`
+Gradle: `implementation("me.lemire.fastfilter:jbinfuse:0.0.2")`
+
+Version 0.0.2 is the first version published to Maven Central. Version 0.0.1 was tagged but
+never published: Central rejected its `io.github.fastfilter` groupId.
 
 Requires Java 21 or later.
 
@@ -262,7 +265,7 @@ Releases are published to Maven Central by the
    GitHub release.
 
 The workflow uses the repository secrets `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `MAVEN_USER` and
-`MAVEN_PASSWORD` (a Central Portal user token for the `io.github.fastfilter` namespace).
+`MAVEN_PASSWORD` (a Central Portal user token for the `me.lemire` namespace, which covers the `me.lemire.fastfilter` groupId).
 
 ## License
 
